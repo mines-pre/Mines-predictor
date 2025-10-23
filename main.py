@@ -2,9 +2,9 @@ from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import os
-import sqlite3
+import json
 import random
-from datetime import datetime
+import asyncio
 import logging
 
 # Configure logging
@@ -13,120 +13,36 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Environment variables - Vercel me ye add karna hai
+# Environment variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID', '123456789')  # Your Telegram ID
-VERCEL_URL = os.environ.get('VERCEL_URL', 'https://your-app.vercel.app')
+ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID')
+VERCEL_URL = os.environ.get('VERCEL_URL', 'https://mines-predictor-ten.vercel.app')
 AFFILIATE_LINK = os.environ.get('AFFILIATE_LINK', 'https://lkpq.cc/cd7800')
 
-# Telegram app initialize
-if BOT_TOKEN:
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
-else:
-    telegram_app = None
-
-# Database setup
-def init_db():
-    try:
-        conn = sqlite3.connect('users.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                player_id TEXT UNIQUE,
-                language TEXT DEFAULT 'en',
-                registered INTEGER DEFAULT 0,
-                total_deposit REAL DEFAULT 0,
-                predictions_used INTEGER DEFAULT 0,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS postback_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT,
-                user_id TEXT,
-                amount REAL,
-                event_data TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Database error: {e}")
-
-init_db()
+# Global storage (Vercel compatible - in-memory)
+users_storage = {}
+postback_storage = []
 
 # Conversation states
 ENTER_PLAYER_ID = 1
 
-# All Mines Signals
+# Mines Signals
 MINES_SIGNALS = [
-    {
-        "traps": 1, "accuracy": 97,
-        "grid": ["🔒🔒🔒🔒💰", "🔒🔒🔒💰🔒", "💰🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒🔒🔒🔒💰"]
-    },
-    {
-        "traps": 1, "accuracy": 90,
-        "grid": ["🔒🔒🔒🔒🔒", "💰🔒💰🔒🔒", "🔒💰🔒🔒🔒", "🔒💰🔒💰🔒", "🔒🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 96,
-        "grid": ["🔒🔒🔒🔒🔒", "🔒🔒🔒💰🔒", "🔒💰🔒🔒💰", "💰🔒🔒🔒💰", "🔒🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 95,
-        "grid": ["💰🔒🔒🔒🔒", "💰🔒🔒🔒🔒", "🔒🔒🔒🔒🔒", "💰🔒🔒🔒🔒", "💰🔒🔒💰🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 96,
-        "grid": ["🔒🔒💰🔒🔒", "🔒💰🔒💰🔒", "💰🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "🔒🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 91,
-        "grid": ["🔒💰🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒💰🔒💰🔒", "💰🔒🔒🔒🔒", "🔒🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 94,
-        "grid": ["🔒💰💰🔒🔒", "🔒🔒🔒🔒🔒", "🔒🔒🔒🔒💰", "🔒🔒🔒🔒🔒", "💰🔒💰🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 92,
-        "grid": ["🔒🔒🔒💰🔒", "💰💰🔒🔒💰", "🔒🔒🔒🔒🔒", "🔒🔒🔒💰🔒", "🔒🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 90,
-        "grid": ["💰🔒🔒💰🔒", "💰🔒💰🔒🔒", "🔒🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 92,
-        "grid": ["🔒🔒🔒💰🔒", "🔒🔒🔒🔒🔒", "🔒🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "💰🔒💰💰🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 93,
-        "grid": ["💰🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "💰🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "💰🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 97,
-        "grid": ["💰🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒🔒🔒🔒🔒", "💰💰🔒🔒💰", "🔒🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 90,
-        "grid": ["💰🔒🔒💰🔒", "🔒🔒🔒🔒🔒", "🔒🔒🔒🔒🔒", "💰🔒💰🔒🔒", "💰🔒🔒🔒🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 96,
-        "grid": ["🔒🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "💰🔒💰💰🔒"]
-    },
-    {
-        "traps": 1, "accuracy": 94,
-        "grid": ["🔒🔒💰🔒🔒", "🔒🔒💰🔒🔒", "💰🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒💰🔒🔒🔒"]
-    }
+    {"traps": 1, "accuracy": 97, "grid": ["🔒🔒🔒🔒💰", "🔒🔒🔒💰🔒", "💰🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒🔒🔒🔒💰"]},
+    {"traps": 1, "accuracy": 90, "grid": ["🔒🔒🔒🔒🔒", "💰🔒💰🔒🔒", "🔒💰🔒🔒🔒", "🔒💰🔒💰🔒", "🔒🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 96, "grid": ["🔒🔒🔒🔒🔒", "🔒🔒🔒💰🔒", "🔒💰🔒🔒💰", "💰🔒🔒🔒💰", "🔒🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 95, "grid": ["💰🔒🔒🔒🔒", "💰🔒🔒🔒🔒", "🔒🔒🔒🔒🔒", "💰🔒🔒🔒🔒", "💰🔒🔒💰🔒"]},
+    {"traps": 1, "accuracy": 96, "grid": ["🔒🔒💰🔒🔒", "🔒💰🔒💰🔒", "💰🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "🔒🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 91, "grid": ["🔒💰🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒💰🔒💰🔒", "💰🔒🔒🔒🔒", "🔒🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 94, "grid": ["🔒💰💰🔒🔒", "🔒🔒🔒🔒🔒", "🔒🔒🔒🔒💰", "🔒🔒🔒🔒🔒", "💰🔒💰🔒🔒"]},
+    {"traps": 1, "accuracy": 92, "grid": ["🔒🔒🔒💰🔒", "💰💰🔒🔒💰", "🔒🔒🔒🔒🔒", "🔒🔒🔒💰🔒", "🔒🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 90, "grid": ["💰🔒🔒💰🔒", "💰🔒💰🔒🔒", "🔒🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 92, "grid": ["🔒🔒🔒💰🔒", "🔒🔒🔒🔒🔒", "🔒🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "💰🔒💰💰🔒"]},
+    {"traps": 1, "accuracy": 93, "grid": ["💰🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "💰🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "💰🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 97, "grid": ["💰🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒🔒🔒🔒🔒", "💰💰🔒🔒💰", "🔒🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 90, "grid": ["💰🔒🔒💰🔒", "🔒🔒🔒🔒🔒", "🔒🔒🔒🔒🔒", "💰🔒💰🔒🔒", "💰🔒🔒🔒🔒"]},
+    {"traps": 1, "accuracy": 96, "grid": ["🔒🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒🔒🔒🔒🔒", "🔒🔒💰🔒🔒", "💰🔒💰💰🔒"]},
+    {"traps": 1, "accuracy": 94, "grid": ["🔒🔒💰🔒🔒", "🔒🔒💰🔒🔒", "💰🔒🔒🔒🔒", "🔒💰🔒🔒🔒", "🔒💰🔒🔒🔒"]}
 ]
 
 # Language Messages
@@ -217,39 +133,89 @@ MESSAGES = {
 def get_message(lang, key):
     return MESSAGES.get(lang, MESSAGES['en']).get(key, '')
 
-# Database functions
+# Storage functions (Vercel compatible - in-memory)
 def get_user(user_id):
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    user = cursor.fetchone()
-    conn.close()
-    return user
+    user_id = str(user_id)
+    return users_storage.get(user_id, {
+        'user_id': user_id,
+        'player_id': None,
+        'language': 'en',
+        'registered': False,
+        'total_deposit': 0,
+        'predictions_used': 0
+    })
 
 def update_user(user_id, **kwargs):
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    cursor = conn.cursor()
+    user_id = str(user_id)
+    if user_id not in users_storage:
+        users_storage[user_id] = {'user_id': user_id}
     
-    if not get_user(user_id):
-        cursor.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
-    
-    set_clause = ", ".join([f"{key} = ?" for key in kwargs.keys()])
-    values = list(kwargs.values())
-    values.append(user_id)
-    
-    cursor.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", values)
-    conn.commit()
-    conn.close()
+    for key, value in kwargs.items():
+        users_storage[user_id][key] = value
 
-def add_postback_event(event_type, user_id, amount=0, event_data=""):
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO postback_events (event_type, user_id, amount, event_data) VALUES (?, ?, ?, ?)",
-        (event_type, user_id, amount, event_data)
-    )
-    conn.commit()
-    conn.close()
+def add_postback_event(event_type, user_id, amount=0):
+    postback_storage.append({
+        'event_type': event_type,
+        'user_id': user_id,
+        'amount': amount,
+        'timestamp': str(asyncio.get_event_loop().time()) if asyncio.get_event_loop() else '0'
+    })
+
+def check_user_status(player_id):
+    """Check user registration and deposit status"""
+    user_events = [event for event in postback_storage if event['user_id'] == player_id]
+    
+    if not user_events:
+        return "not_registered"
+    
+    has_registration = any(event['event_type'] == 'registration' for event in user_events)
+    total_deposit = sum(event['amount'] for event in user_events if event['event_type'] in ['first_deposit', 'deposit', 'recurring_deposit'])
+    
+    if not has_registration:
+        return "not_registered"
+    elif total_deposit < 5:
+        return "registered_no_deposit"
+    else:
+        return "verified"
+
+# Initialize Telegram application
+def initialize_bot():
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN not found in environment variables")
+        return None
+    
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Add handlers
+        conv_handler = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(handle_check_registration, pattern="^check_registration$"),
+                CallbackQueryHandler(handle_check_deposit, pattern="^check_deposit$")
+            ],
+            states={
+                ENTER_PLAYER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_player_id)]
+            },
+            fallbacks=[],
+            per_message=False
+        )
+        
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(handle_language, pattern="^lang_"))
+        application.add_handler(conv_handler)
+        application.add_handler(CallbackQueryHandler(handle_get_signal, pattern="^get_signal$"))
+        application.add_handler(CallbackQueryHandler(handle_next_signal, pattern="^next_signal$"))
+        application.add_handler(CallbackQueryHandler(handle_back_to_start, pattern="^back_to_start$"))
+        
+        logger.info("Bot initialized successfully")
+        return application
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize bot: {e}")
+        return None
+
+# Initialize bot
+telegram_app = initialize_bot()
 
 # Telegram Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,7 +232,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "**Select your preferred Language:**",
-        reply_markup=reply_markup
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
     )
 
 async def handle_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,8 +243,7 @@ async def handle_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     language = query.data.split('_')[1]
     user_id = query.from_user.id
     
-    update_user(user_id, language=language, last_activity=datetime.now())
-    
+    update_user(user_id, language=language)
     await show_registration_section(query, context, language)
 
 async def show_registration_section(query, context: ContextTypes.DEFAULT_TYPE, language):
@@ -307,7 +273,7 @@ async def handle_check_registration(update: Update, context: ContextTypes.DEFAUL
     
     user_id = query.from_user.id
     user = get_user(user_id)
-    language = user[2] if user else 'en'
+    language = user.get('language', 'en')
     
     await query.edit_message_text(
         f"{get_message(language, 'enter_player_id')}\n\n"
@@ -320,11 +286,19 @@ async def handle_check_registration(update: Update, context: ContextTypes.DEFAUL
 
 async def handle_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    player_id = update.message.text
-    language = get_user(user_id)[2] if get_user(user_id) else 'en'
+    player_id = update.message.text.strip()
+    user = get_user(user_id)
+    language = user.get('language', 'en')
     
-    # Check user status from database
-    user_status = check_user_status(player_id)
+    # For testing - predefined test cases
+    if player_id == 'test123':
+        user_status = "not_registered"
+    elif player_id == 'test456':
+        user_status = "registered_no_deposit"
+    elif player_id == 'test789':
+        user_status = "verified"
+    else:
+        user_status = check_user_status(player_id)
     
     if user_status == "not_registered":
         keyboard = [[InlineKeyboardButton(get_message(language, 'register_now'), url=AFFILIATE_LINK)]]
@@ -353,7 +327,7 @@ async def handle_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
     elif user_status == "verified":
-        update_user(user_id, player_id=player_id, last_activity=datetime.now())
+        update_user(user_id, player_id=player_id)
         
         keyboard = [[InlineKeyboardButton(get_message(language, 'get_signal'), callback_data="get_signal")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -366,49 +340,16 @@ async def handle_player_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
-def check_user_status(player_id):
-    """Check user registration and deposit status"""
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    cursor = conn.cursor()
-    
-    # Check if we have postback events for this player
-    cursor.execute("SELECT * FROM postback_events WHERE user_id = ?", (player_id,))
-    events = cursor.fetchall()
-    conn.close()
-    
-    if not events:
-        return "not_registered"
-    
-    # Check if user has made a deposit of at least $5
-    total_deposit = 0
-    has_registration = False
-    
-    for event in events:
-        event_type = event[1]
-        amount = event[3] or 0
-        
-        if event_type == 'registration':
-            has_registration = True
-        elif event_type in ['first_deposit', 'deposit']:
-            total_deposit += amount
-    
-    if not has_registration:
-        return "not_registered"
-    elif total_deposit < 5:  # $5 minimum
-        return "registered_no_deposit"
-    else:
-        return "verified"
-
 async def handle_get_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
     user = get_user(user_id)
-    language = user[2] if user else 'en'
+    language = user.get('language', 'en')
     
     # Check prediction limit
-    predictions_used = user[5] if user else 0
+    predictions_used = user.get('predictions_used', 0)
     
     if predictions_used >= 15:
         await show_deposit_again_message(query, context, language)
@@ -418,7 +359,7 @@ async def handle_get_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     signal = random.choice(MINES_SIGNALS)
     
     # Update prediction count
-    update_user(user_id, predictions_used=predictions_used + 1, last_activity=datetime.now())
+    update_user(user_id, predictions_used=predictions_used + 1)
     
     # Format signal message
     signal_text = (
@@ -455,7 +396,6 @@ async def handle_next_signal(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
-    # Delete previous message and send new one
     await query.delete_message()
     await handle_get_signal(update, context)
 
@@ -465,7 +405,7 @@ async def handle_back_to_start(update: Update, context: ContextTypes.DEFAULT_TYP
     
     user_id = query.from_user.id
     user = get_user(user_id)
-    language = user[2] if user else 'en'
+    language = user.get('language', 'en')
     
     await show_registration_section(query, context, language)
 
@@ -475,7 +415,7 @@ async def handle_check_deposit(update: Update, context: ContextTypes.DEFAULT_TYP
     
     user_id = query.from_user.id
     user = get_user(user_id)
-    language = user[2] if user else 'en'
+    language = user.get('language', 'en')
     
     await query.edit_message_text(
         f"{get_message(language, 'enter_player_id')}\n\n"
@@ -496,7 +436,35 @@ async def show_deposit_again_message(query, context: ContextTypes.DEFAULT_TYPE, 
         parse_mode='Markdown'
     )
 
-# Postback Handler
+# Flask Routes
+@app.route('/')
+def home():
+    return "🤖 Mines Predictor Bot is Running! Webhook active."
+
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    try:
+        if telegram_app:
+            update = Update.de_json(request.get_json(), telegram_app.bot)
+            await telegram_app.process_update(update)
+        return "OK"
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "ERROR", 500
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    if telegram_app and BOT_TOKEN:
+        webhook_url = f"{VERCEL_URL}/webhook"
+        try:
+            # Use requests to set webhook synchronously
+            import requests
+            response = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+            return f"✅ Webhook set: {response.json()}"
+        except Exception as e:
+            return f"❌ Webhook error: {e}"
+    return "❌ Bot not initialized"
+
 @app.route('/postback', methods=['GET'])
 def handle_postback():
     try:
@@ -507,77 +475,27 @@ def handle_postback():
         logger.info(f"Postback received: {event_type} for user {user_id} amount {amount}")
         
         # Store postback event
-        add_postback_event(event_type, user_id, amount, str(dict(request.args)))
+        add_postback_event(event_type, user_id, amount)
         
-        # Update user status based on postback
-        if event_type == 'registration':
-            # User registered
-            pass
-        elif event_type in ['first_deposit', 'deposit']:
-            # User made a deposit
-            conn = sqlite3.connect('users.db', check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE users SET total_deposit = total_deposit + ? WHERE player_id = ?",
-                (amount, user_id)
-            )
-            conn.commit()
-            conn.close()
-        
-        return jsonify({"status": "success"}), 200
+        return jsonify({
+            "status": "success", 
+            "message": f"Postback received: {event_type}",
+            "user_id": user_id,
+            "amount": amount
+        }), 200
         
     except Exception as e:
         logger.error(f"Postback error: {e}")
-        return jsonify({"status": "error"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-# Flask Routes
-@app.route('/')
-def home():
-    return "🤖 Mines Predictor Bot is Running!"
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    if telegram_app:
-        update = Update.de_json(request.get_json(), telegram_app.bot)
-        telegram_app.update_queue.put(update)
-    return "OK"
-
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    if telegram_app:
-        webhook_url = f"{VERCEL_URL}/webhook"
-        telegram_app.bot.set_webhook(webhook_url)
-        return f"Webhook set to: {webhook_url}"
-    return "Telegram app not initialized"
-
-# Setup Telegram Handlers
-def setup_handlers():
-    if not telegram_app:
-        return
-    
-    # Conversation handler for player ID input
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(handle_check_registration, pattern="^check_registration$"),
-            CallbackQueryHandler(handle_check_deposit, pattern="^check_deposit$")
-        ],
-        states={
-            ENTER_PLAYER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_player_id)]
-        },
-        fallbacks=[]
-    )
-    
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CallbackQueryHandler(handle_language, pattern="^lang_"))
-    telegram_app.add_handler(conv_handler)
-    telegram_app.add_handler(CallbackQueryHandler(handle_get_signal, pattern="^get_signal$"))
-    telegram_app.add_handler(CallbackQueryHandler(handle_next_signal, pattern="^next_signal$"))
-    telegram_app.add_handler(CallbackQueryHandler(handle_back_to_start, pattern="^back_to_start$"))
-    
-    telegram_app.initialize()
-
-# Initialize
-setup_handlers()
+@app.route('/debug')
+def debug():
+    return jsonify({
+        "users_count": len(users_storage),
+        "postbacks_count": len(postback_storage),
+        "webhook_url": f"{VERCEL_URL}/webhook",
+        "bot_initialized": telegram_app is not None
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
